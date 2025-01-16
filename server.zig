@@ -1,6 +1,7 @@
 const std = @import("std");
 const net = std.net;
 const mem = std.mem;
+const types = @import("types.zig");
 
 const Server = struct {
     const Self = @This();
@@ -31,7 +32,7 @@ const Server = struct {
     pub fn deinit(self: *Self) void {
         self.allocator.destroy(self);
     }
-    fn read_stream(self: *Self, connection: net.Server.Connection) !void {
+    fn read_stream(self: *Self, connection: net.Server.Connection) ![]u8 {
         const page_size = 1024;
         var page: usize = 1;
 
@@ -52,9 +53,38 @@ const Server = struct {
             if (read == 0) {
                 break; // End of stream
             } else {
-                std.debug.print("Read {d} bytes\n{s}\n", .{ read, buffer[0..read] });
+                std.debug.print("Read {d} bytes\n", .{read});
                 page += 1;
             }
+        }
+        return buffer;
+    }
+
+    fn parse_message_buffer(buffer: []u8) types.ClientErrors!types.Message {
+        var message_parts = mem.splitScalar(u8, buffer, " ");
+        const command = message_parts.first();
+        const value = message_parts.next() orelse return types.ClientErrors.BadRequest;
+
+        var message = types.Message{};
+
+        if (std.mem.eql(u8, command, "connect")) {
+            message.command = types.Commands.CONNECT;
+        } else if (std.mem.eql(u8, command, "disconnect")) {
+            message.command = types.Commands.DISCONNECT;
+        } else {
+            return types.ClientErrors.UnknownCommand;
+        }
+
+        message.value = value;
+
+        return message;
+    }
+
+    fn handle_command(message: types.Message) !void {
+        switch (message.command) {
+            types.Commands.CONNECT => {},
+            types.Commands.DISCONNECT => {},
+            types.Commands.SEND => {},
         }
     }
 
@@ -63,8 +93,19 @@ const Server = struct {
 
         while (true) {
             const connection = try self.server.accept();
-            _ = try self.read_stream(connection);
-            connection.stream.close();
+            const buffer = try self.read_stream(connection);
+            const message = parse_message_buffer(buffer) catch |err| {
+                switch (err) {
+                    types.ClientErrors.BadRequest => {
+                        connection.stream.writeAll("ERR: Bad request -> {COMMAND} {VALUE}");
+                    },
+                    types.ClientErrors.UnknownCommand => {
+                        connection.stream.writeAll("ERR: Unknown Command -> please send 'HELP' for command list");
+                    },
+                }
+            };
+
+            handle_command(message);
         }
     }
     pub fn run(self: *Self) !void {
