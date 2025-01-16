@@ -31,29 +31,47 @@ const Server = struct {
     pub fn deinit(self: *Self) void {
         self.allocator.destroy(self);
     }
-    fn read_stream(self: *Self) !void {
+    fn read_stream(self: *Self, connection: net.Server.Connection) !void {
         const page_size = 1024;
-        var page = 0;
-        const buffer = try self.allocator.alloc(u8, page_size);
+        var page: usize = 1;
+
+        var buffer = try self.allocator.alloc(u8, page_size);
+        defer self.allocator.free(buffer);
+
         while (true) {
-            const read = try self.server.stream.read(buffer[(page-1) * page_size..page_size * page.. ]);
+            const start = (page - 1) * page_size;
+            const end = page * page_size;
+
+            if (buffer.len < end) {
+                buffer = try self.allocator.realloc(buffer, end);
+            }
+
+            const slice = buffer[start..end];
+            const read = try connection.stream.read(slice);
+
             if (read == 0) {
-                break;
-            } else {}
+                break; // End of stream
+            } else {
+                std.debug.print("Read {d} bytes\n{s}\n", .{ read, buffer[0..read] });
+                page += 1;
+            }
         }
     }
-    fn mainloop(self: *Self) void {
+
+    fn mainloop(self: *Self) !void {
         std.debug.print("Server started\n", .{});
 
         while (true) {
-            self.read_stream();
+            const connection = try self.server.accept();
+            _ = try self.read_stream(connection);
+            connection.stream.close();
         }
     }
     pub fn run(self: *Self) !void {
         const listen_config = net.Address.ListenOptions{ .reuse_address = true, .reuse_port = true };
         const server = try self.addr.listen(listen_config);
         self.server = server;
-        mainloop();
+        try self.mainloop();
     }
 };
 pub fn main() !void {
