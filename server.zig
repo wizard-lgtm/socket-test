@@ -11,6 +11,7 @@ const Server = struct {
     allocator: mem.Allocator,
     addr: net.Address,
     public: bool,
+    users: std.ArrayList(types.User),
 
     fn init_ip(public: bool, port: u16) net.Address {
         if (public) {
@@ -26,10 +27,12 @@ const Server = struct {
         self.port = port;
         self.public = public orelse false;
         self.addr = init_ip(self.public, self.port);
+        self.users = std.ArrayList(types.User).init(allocator);
 
         return self;
     }
     pub fn deinit(self: *Self) void {
+        self.users.deinit();
         self.allocator.destroy(self);
     }
     fn read_stream(self: *Self, connection: net.Server.Connection) ![]u8 {
@@ -61,11 +64,11 @@ const Server = struct {
     }
 
     fn parse_message_buffer(buffer: []u8) types.ClientErrors!types.Message {
-        var message_parts = mem.splitScalar(u8, buffer, " ");
-        const command = message_parts.first();
+        var message_parts = mem.splitSequence(u8, buffer, " ");
+        const command = message_parts.next() orelse return types.ClientErrors.BadRequest;
         const value = message_parts.next() orelse return types.ClientErrors.BadRequest;
 
-        var message = types.Message{};
+        var message: types.Message = undefined;
 
         if (std.mem.eql(u8, command, "connect")) {
             message.command = types.Commands.CONNECT;
@@ -80,14 +83,33 @@ const Server = struct {
         return message;
     }
 
-    fn handle_command(message: types.Message) !void {
+    fn handle_command(self: *Self, message: types.Message, connection: net.Server.Connection) !void {
         switch (message.command) {
-            types.Commands.CONNECT => {},
-            types.Commands.DISCONNECT => {},
+            types.Commands.CONNECT => {
+                const new_user = types.User{ .connected = true, .username = message.value, .connection = connection };
+                try self.users.append(new_user);
+                std.debug.print("New {s} connected\n", .{new_user.username});
+            },
+            types.Commands.DISCONNECT => {
+                for (self.users.items, 0..self.users.items.len) |user, i| {
+                    if (mem.eql(u8, user.username, message.value)) {
+                        _ = self.users.swapRemove(i);
+                        break;
+                    }
+                }
+                std.debug.print("User {s} disconnected\n", .{message.value});
+            },
             types.Commands.SEND => {},
         }
     }
 
+    fn broadcast_message(self: *Self, message: types.Message, author: []const u8) !void {
+        for (self.users.items) |user| {
+            if (mem.eql(u8, user.username, author)) {
+                try user.connection.stream.write(message.value);
+            }
+        }
+    }
     fn mainloop(self: *Self) !void {
         std.debug.print("Server started\n", .{});
 
@@ -97,15 +119,16 @@ const Server = struct {
             const message = parse_message_buffer(buffer) catch |err| {
                 switch (err) {
                     types.ClientErrors.BadRequest => {
-                        connection.stream.writeAll("ERR: Bad request -> {COMMAND} {VALUE}");
+                        try connection.stream.writeAll("ERR: Bad request -> {COMMAND} {VALUE}");
                     },
                     types.ClientErrors.UnknownCommand => {
-                        connection.stream.writeAll("ERR: Unknown Command -> please send 'HELP' for command list");
+                        try connection.stream.writeAll("ERR: Unknown Command -> please send 'HELP' for command list");
                     },
                 }
+                return undefined;
             };
 
-            handle_command(message);
+            try self.handle_command(message, connection);
         }
     }
     pub fn run(self: *Self) !void {
